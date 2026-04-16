@@ -8,20 +8,21 @@ Notes:
 
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+import numpy as np
 
 
 setup(
-    name='emd_ext',
+    name="emd_ext",
     ext_modules=[
         CUDAExtension(
-            name='emd_cuda',
+            name="emd_cuda",
             sources=[
-                'cuda/emd.cpp',
-                'cuda/emd_kernel.cu',
+                "cuda/emd.cpp",
+                "cuda/emd_kernel.cu",
             ],
-            extra_compile_args={'cxx': ['-g'], 'nvcc': ['-O2']}
+            extra_compile_args={"cxx": ["-g"], "nvcc": ["-O2"]},
         ),
     ],
-    cmdclass={
-        'build_ext': BuildExtension
-    })
+    cmdclass={"build_ext": BuildExtension},
+    include_dirs=[np.get_include()],
+)

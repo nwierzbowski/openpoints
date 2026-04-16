@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=59.5.0", "torch>=2.0.0", "ninja", "numpy<2.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emd-ext"
+version = "1.0.0"
+description = "Earth Mover's Distance CUDA extension"
+requires-python = ">=3.9,<3.10"
+
+[tool.setuptools.packages.find]
+where = ["."]
