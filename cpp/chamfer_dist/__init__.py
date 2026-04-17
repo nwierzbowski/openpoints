@@ -21,13 +21,16 @@ class ChamferFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_dist1, grad_dist2):
         xyz1, xyz2, idx1, idx2 = ctx.saved_tensors
-        grad_xyz1, grad_xyz2 = chamfer.backward(xyz1, xyz2, idx1, idx2, grad_dist1, grad_dist2)
+        grad_xyz1, grad_xyz2 = chamfer.backward(
+            xyz1, xyz2, idx1, idx2, grad_dist1, grad_dist2
+        )
         return grad_xyz1, grad_xyz2
 
 
 class ChamferDistanceL2(torch.nn.Module):
-    f''' Chamder Distance L2
-    '''
+    f""" Chamder Distance L2
+    """
+
     def __init__(self, ignore_zeros=False):
         super().__init__()
         self.ignore_zeros = ignore_zeros
@@ -43,9 +46,11 @@ class ChamferDistanceL2(torch.nn.Module):
         dist1, dist2 = ChamferFunction.apply(xyz1, xyz2)
         return torch.mean(dist1) + torch.mean(dist2)
 
+
 class ChamferDistanceL2_split(torch.nn.Module):
-    f''' Chamder Distance L2
-    '''
+    f""" Chamder Distance L2
+    """
+
     def __init__(self, ignore_zeros=False):
         super().__init__()
         self.ignore_zeros = ignore_zeros
@@ -61,9 +66,11 @@ class ChamferDistanceL2_split(torch.nn.Module):
         dist1, dist2 = ChamferFunction.apply(xyz1, xyz2)
         return torch.mean(dist1), torch.mean(dist2)
 
+
 class ChamferDistanceL1(torch.nn.Module):
-    f''' Chamder Distance L1
-    '''
+    f""" Chamder Distance L1
+    """
+
     def __init__(self, ignore_zeros=False):
         super().__init__()
         self.ignore_zeros = ignore_zeros
@@ -81,5 +88,4 @@ class ChamferDistanceL1(torch.nn.Module):
         # pdb.set_trace()
         dist1 = torch.sqrt(dist1)
         dist2 = torch.sqrt(dist2)
-        return (torch.mean(dist1) + torch.mean(dist2))/2
-
+        return (torch.mean(dist1) + torch.mean(dist2)) / 2

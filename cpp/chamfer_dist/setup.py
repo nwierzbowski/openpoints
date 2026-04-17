@@ -19,6 +19,7 @@ setup(
                 "chamfer_cuda.cpp",
                 "chamfer.cu",
             ],
+            extra_compile_args={"cxx": ["-g", "-D_GLIBCXX_USE_CXX11_ABI=0"]},
         ),
     ],
     cmdclass={"build_ext": BuildExtension},

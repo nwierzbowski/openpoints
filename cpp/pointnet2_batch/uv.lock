@@ -1,0 +1,8 @@
+version = 1
+revision = 3
+requires-python = "==3.9.*"
+
+[[package]]
+name = "pointnet2-cuda"
+version = "1.0.0"
+source = { editable = "." }

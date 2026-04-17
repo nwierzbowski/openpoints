@@ -18,7 +18,7 @@ setup(
                 "src/sampling.cpp",
                 "src/sampling_gpu.cu",
             ],
-            extra_compile_args={"cxx": ["-g"], "nvcc": ["-O2"]},
+            extra_compile_args={"cxx": ["-g", "-D_GLIBCXX_USE_CXX11_ABI=0"], "nvcc": ["-O2"]},
         ),
     ],
     cmdclass={"build_ext": BuildExtension},

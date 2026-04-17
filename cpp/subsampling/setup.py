@@ -16,4 +16,4 @@ module = Extension(
     include_dirs=[np.get_include()],
 )
 
-setup(ext_modules=[module])
+setup(name="grid-subsampling", ext_modules=[module])
