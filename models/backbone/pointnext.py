@@ -455,6 +455,16 @@ class PointNextEncoder(nn.Module):
     def forward(self, p0, f0=None):
         return self.forward_seg_feat(p0, f0)
 
+    def ssl_forward(self, p0, f0=None):
+        """Forward pass for SSL - returns (B, C_out, N) without squeeze."""
+        if hasattr(p0, 'keys'):
+            p0, f0 = p0['pos'], p0.get('x', None)
+        if f0 is None:
+            f0 = p0.clone().transpose(1, 2).contiguous()
+        for i in range(0, len(self.encoder)):
+            p0, f0 = self.encoder[i]([p0, f0])
+        return f0
+
 
 @MODELS.register_module()
 class PointNextDecoder(nn.Module):

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "grid-subsampling"
 version = "1.0.0"
 description = "Grid subsampling library"
-requires-python = ">=3.9,<3.10"
+requires-python = ">=3.10,<3.11"
 
 [tool.setuptools.packages.find]
 where = ["."]
