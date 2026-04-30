@@ -99,6 +99,9 @@ class TBODataset(Dataset):
             if magic.rstrip(b'\x00') != b'TBO':
                 raise ValueError(f'Invalid TBO magic in {path}')
 
+            # UUID size depends on TBO version: v2=16 bytes, v3+=32 bytes
+            uuid_size = 32 if version >= 3 else 16
+
             # Read channel names
             for _ in range(channel_count):
                 while True:
@@ -107,7 +110,7 @@ class TBODataset(Dataset):
                         break
 
             # Read UUIDs
-            uuid_data = f.read(asset_count * 16)
+            uuid_data = f.read(asset_count * uuid_size)
 
             # Read cumulative offsets
             offset_data = f.read(asset_count * 4)
@@ -126,7 +129,7 @@ class TBODataset(Dataset):
         uuid_list = []
 
         for i in range(asset_count):
-            uuid_hex = uuid_data[i * 16 : (i + 1) * 16].hex()
+            uuid_hex = uuid_data[i * uuid_size : (i + 1) * uuid_size].hex()
             offset = (offsets[i] - header_size) // 4
             next_offset = (
                 (offsets[i + 1] - header_size) // 4
