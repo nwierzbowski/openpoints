@@ -12,6 +12,7 @@ import chamfer
 
 class ChamferFunction(torch.autograd.Function):
     @staticmethod
+    @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, xyz1, xyz2):
         dist1, dist2, idx1, idx2 = chamfer.forward(xyz1, xyz2)
         ctx.save_for_backward(xyz1, xyz2, idx1, idx2)
