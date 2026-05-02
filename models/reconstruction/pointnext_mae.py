@@ -26,7 +26,7 @@ class PointNextMAE(nn.Module):
         encoder_args,
         latent_dim=256,
         decoder_points=1024,
-        decoder_hidden_dim=512,
+        decoder_hidden_dim=1024,
         jitter_sigma=0.01,
         jitter_prob=0.9,
         **kwargs,
@@ -54,13 +54,25 @@ class PointNextMAE(nn.Module):
 
         # Decoder MLP: [point_xyz (3) + latent (latent_dim)] -> (3)
         self.decoder_mlp = nn.Sequential(
-            nn.Linear(3 + latent_dim, decoder_hidden_dim),
+            # Stage 1: Massive Unfolding
+            nn.Linear(3 + latent_dim, decoder_hidden_dim), 
+            nn.LayerNorm(1024),
             nn.ReLU(),
+
+            # Stage 2: Structural Logic
             nn.Linear(decoder_hidden_dim, decoder_hidden_dim),
             nn.ReLU(),
+
+            # Stage 3: Feature Refinement
             nn.Linear(decoder_hidden_dim, decoder_hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(decoder_hidden_dim // 2, 3),
+
+            # Stage 4: High-Frequency Detail
+            nn.Linear(decoder_hidden_dim // 2, decoder_hidden_dim // 4),
+            nn.ReLU(),
+
+            # Stage 5: The 5-Channel Head
+            nn.Linear(decoder_hidden_dim // 4, 3), 
             nn.Tanh(),
         )
 
