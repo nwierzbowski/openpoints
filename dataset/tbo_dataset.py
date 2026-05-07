@@ -1,132 +1,93 @@
-"""TBO Dataset for PointNeXt training.
+"""TBODataset - Point cloud dataset for TBO (Texture-Based Objects).
 
-Accesses TBO data already loaded by TBOManager (via Training Import tab).
-Data is already preprocessed (centered, scaled, rotated) so no transforms needed.
+Registered with openpoints DATASETS registry for use with build_dataloader_from_cfg.
 """
-import logging
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from ..build import DATASETS
+
+from ..dataset.build import DATASETS
+
+
+def _build_x_tensor(pos, feat, in_channels):
+    """Build input features tensor from torch tensors.
+    
+    Pads or truncates feature channels to match in_channels, then
+    concatenates with positions.
+    """
+    if in_channels >= 4:
+        needed = in_channels - 3
+        if feat.shape[1] < needed:
+            pad = torch.zeros(
+                feat.shape[0], needed - feat.shape[1],
+                dtype=torch.float32, device=feat.device,
+            )
+            feat = torch.cat([feat, pad], dim=1)
+        feat = feat[:, :needed]
+        return torch.cat([pos, feat], dim=1)
+    # in_channels == 3: pad to 4 channels with constant 1.0 for vec4 alignment
+    pad = torch.ones(pos.shape[0], 1, dtype=torch.float32, device=pos.device)
+    return torch.cat([pos, pad], dim=1)
 
 
 @DATASETS.register_module()
 class TBODataset(Dataset):
-    """Dataset that accesses point cloud data from TBOManager.
-
+    """PyTorch Dataset for TBO point cloud data.
+    
+    Stores positions, features, and uuids in memory. Returns dicts with
+    'pos', 'x', 'feat', and 'uuids' keys for each sample.
+    
     Args:
-        data_dir: Directory containing .tbo files (used to verify files exist)
-        split: 'train' or 'test' (uses split file or ratio)
-        num_points: Number of points per sample (default: 1024)
-        in_channels: Number of input channels (default: auto-detect from TBOManager)
-        split_file: Optional file with UUIDs for train/test assignment
-        split_ratio: Fraction for train split (default: 0.8)
+        positions: list of numpy arrays (N, 3) - point coordinates
+        features: list of numpy arrays (N, C) - feature vectors
+        uuids: list of string identifiers
+        num_points: number of points per sample (all data must be pre-resized)
+        in_channels: number of input channels (3 + features)
+        transform: optional callable to transform data dict
     """
-
-    def __init__(
-        self,
-        data_dir,
-        split='train',
-        num_points=1024,
-        in_channels=None,
-        split_file=None,
-        split_ratio=0.8,
-        transform=None,
-        **kwargs,
-    ):
-        super().__init__()
-        self.partition = split
-        self.num_points = num_points
-        self.transform = transform
-        self.data_dir = data_dir
-
-        # Access assets already loaded by TBOManager (via Training Import tab)
-        from curator.application.services.tbo_manager import TBOManager
-        manager = TBOManager.instance()
-        if not manager.is_loaded:
-            raise RuntimeError('TBOManager has no loaded data. Load files via Training Import tab first.')
-
-        self.positions = [a.positions for a in manager.assets if a.split == self.partition]
-        self.features = [a.features for a in manager.assets if a.split == self.partition]
-        self.uuids = [a.uuid for a in manager.assets if a.split == self.partition]
-
-        # Set in_channels from TBOManager
+    
+    def __init__(self, positions, features, uuids, num_points=1024, in_channels=None, encoder_indices=None, transform=None):
         if in_channels is None:
-            ch_count = manager.channel_count
-            if ch_count is None:
-                raise RuntimeError('Cannot detect channel count from TBOManager')
-            in_channels = ch_count
-            logging.info(f'Detected {in_channels} channels from TBOManager')
+            raise ValueError('in_channels is required')
+        self.positions = positions
+        self.features = features
+        self.uuids = uuids
+        self.num_points = num_points
         self.in_channels = in_channels
+        self.encoder_indices = encoder_indices
+        self.transform = transform
 
-        # Apply train/test split
-        if split_file:
-            self._apply_split_file(split_file)
-        else:
-            self._apply_random_split(split_ratio)
-
-        logging.info(
-            f'TBODataset: {len(self)} samples for {split} split, '
-            f'{self.num_points} points, {self.in_channels} channels'
-        )
-
-    def _apply_split_file(self, split_file):
-        """Apply split based on UUID file."""
-        with open(split_file, 'r') as f:
-            split_uuids = set(line.strip() for line in f if line.strip())
-
-        mask = [uuid in split_uuids for uuid in self.uuids]
-        self.positions = [p for p, m in zip(self.positions, mask) if m]
-        self.features = [f for f, m in zip(self.features, mask) if m]
-        self.uuids = [u for u, m in zip(self.uuids, mask) if m]
-
-    def _apply_random_split(self, split_ratio):
-        """Apply random train/test split."""
-        n = len(self.positions)
-        indices = np.random.RandomState(42).permutation(n)
-
-        if self.partition == 'train':
-            split_idx = int(n * split_ratio)
-            selected = indices[:split_idx]
-        else:
-            split_idx = int(n * split_ratio)
-            selected = indices[split_idx:]
-
-        self.positions = [self.positions[i] for i in selected]
-        self.features = [self.features[i] for i in selected]
-        self.uuids = [self.uuids[i] for i in selected]
+    def __len__(self):
+        return len(self.positions)
 
     def __getitem__(self, idx):
-        pos = self.positions[idx].astype(np.float32)
-        feat = self.features[idx].astype(np.float32)
+        pos = self.positions[idx].copy()
+        feat = self.features[idx].copy()
 
-        # Subsample to num_points if needed
-        if len(pos) > self.num_points:
-            perm = np.random.choice(len(pos), self.num_points, replace=False)
-            pos = pos[perm]
-            feat = feat[perm]
-        elif len(pos) < self.num_points:
-            # Pad with zeros
-            pad_size = self.num_points - len(pos)
-            pos = np.pad(pos, ((0, pad_size), (0, 0)), constant_values=0)
-            feat = np.pad(feat, ((0, pad_size), (0, 0)), constant_values=0)
+        # Filter to encoder channels if specified
+        if self.encoder_indices is not None:
+            feat = feat[:, self.encoder_indices]
 
-        # Ensure feature channels match in_channels
-        if self.in_channels > 3:
-            needed_feat_channels = self.in_channels - 3
-            if feat.shape[1] < needed_feat_channels:
-                feat = np.pad(
-                    feat, ((0, 0), (0, needed_feat_channels - feat.shape[1])),
-                    constant_values=0
-                )
-            feat = feat[:, :needed_feat_channels]
-            x = np.concatenate([pos, feat], axis=1)
-        else:
-            x = pos
+        n = len(pos)
+        if n != self.num_points:
+            raise ValueError(
+                f"Sample {self.uuids[idx]} has {n} points but expected {self.num_points}. "
+                "All data must already be resized to num_points before passing to the dataset."
+            )
+
+        pos = torch.from_numpy(pos)
+        feat = torch.from_numpy(feat)
+
+        # Pad feat to 4 channels when in_channels=3 for vec4 alignment
+        if self.in_channels == 3 and feat.shape[1] < 4:
+            pad = torch.ones(feat.shape[0], 4 - feat.shape[1], dtype=feat.dtype, device=feat.device)
+            feat = torch.cat([feat, pad], dim=1)
 
         data = {
-            'pos': torch.from_numpy(pos),       # (N, 3)
-            'x': torch.from_numpy(x),            # (N, in_channels)
+            'pos': pos,
+            'x': _build_x_tensor(pos, feat, self.in_channels),
+            'feat': feat,
+            'uuids': self.uuids[idx],
         }
 
         if self.transform is not None:
@@ -134,5 +95,24 @@ class TBODataset(Dataset):
 
         return data
 
-    def __len__(self):
-        return len(self.positions)
+    @staticmethod
+    def collate_fn(datas):
+        """Collate function for TBODataset.
+        
+        Batches pos, x, feat tensors and keeps uuids as a list.
+        """
+        pos_list = [d['pos'] for d in datas]
+        x_list = [d['x'] for d in datas]
+        feat_list = [d['feat'] for d in datas]
+        uuids = [d['uuids'] for d in datas]
+
+        pos_batch = torch.stack(pos_list, dim=0)
+        x_batch = torch.stack(x_list, dim=0)
+        feat_batch = torch.stack(feat_list, dim=0)
+
+        return {
+            'pos': pos_batch,
+            'x': x_batch,
+            'feat': feat_batch,
+            'uuids': uuids,
+        }

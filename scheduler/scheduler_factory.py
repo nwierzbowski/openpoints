@@ -7,6 +7,7 @@ from .plateau_lr import PlateauLRScheduler
 from .poly_lr import PolyLRScheduler
 from .step_lr import StepLRScheduler
 from .tanh_lr import TanhLRScheduler
+from .warmup_cosine_lr import WarmupCosineLRScheduler
 
 
 def build_scheduler_from_cfg(args, optimizer, return_epochs=False):
@@ -111,6 +112,18 @@ def build_scheduler_from_cfg(args, optimizer, return_epochs=False):
             **noise_args,
         )
         num_epochs = lr_scheduler.get_cycle_length() + cooldown_epochs
+    elif args.sched == 'warmup_cosine':
+        # Step-based warmup: warmup_t is in STEPS (batches), not epochs
+        warmup_steps = getattr(args, 'warmup_t', 0)
+        t_max_steps = getattr(args, 't_max', num_epochs)
+        lr_scheduler = WarmupCosineLRScheduler(
+            optimizer,
+            t_initial=t_max_steps,
+            lr_min=min_lr,
+            warmup_t=warmup_steps,
+            warmup_lr_init=warmup_lr,
+            t_in_epochs=False,
+        )
 
     if return_epochs:
         return lr_scheduler, num_epochs
