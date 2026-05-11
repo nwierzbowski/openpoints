@@ -136,9 +136,9 @@ class SetAbstraction(nn.Module):
                 fi = None
 
             if self.all_aggr:
-                # Group all points (no downsampling, stride=1)
-                dp = p.transpose(1, 2).unsqueeze(2).expand(-1, -1, npoint, -1)  # (B, 3, npoint, N)
-                fj = f.unsqueeze(2).expand(-1, -1, npoint, -1)  # (B, C, npoint, N)
+                # Group all points (no downsampling, stride=1) — match GroupAll: (B, C, 1, N)
+                dp = p.transpose(1, 2).unsqueeze(2)  # (B, 3, 1, N)
+                fj = f.unsqueeze(2)  # (B, C, 1, N)
             else:
                 stride = p.shape[1] // npoint
                 dp, fj = spatial_group(new_p, p, f, stride, self.nsample)

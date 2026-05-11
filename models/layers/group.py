@@ -11,19 +11,20 @@ import torch.nn as nn
 
 
 def grouping_operation(features: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    """Group features by index using torch.gather.
-    
-    Pure PyTorch implementation (replaces CUDA pointnet2_cuda.group_points_wrapper).
-    
+    """Pure PyTorch gather (no custom backward).
+
+    Used as ONNX export fallback — ONNX may fail to trace through
+    the autograd Function wrapper in GroupingOp.
+
     Args:
         features: (B, C, N) tensor of features
         idx: (B, npoint, nsample) tensor containing the indices of features to group with
-    
+
     Returns:
         output: (B, C, npoint, nsample) tensor
     """
-    all_idx = idx.reshape(idx.shape[0], -1)
-    all_idx = all_idx.unsqueeze(1).repeat(1, features.shape[1], 1)
+    all_idx = idx.reshape(idx.shape[0], -1).unsqueeze(1)  # (B, 1, npoint*nsample)
+    all_idx = all_idx.expand(-1, features.shape[1], -1)   # (B, C, npoint*nsample) — zero-copy view
     grouped_features = features.gather(2, all_idx)
     return grouped_features.reshape(idx.shape[0], features.shape[1], idx.shape[1], idx.shape[2])
 
@@ -93,9 +94,9 @@ def spatial_group(query_xyz, support_xyz, features, stride, nsample):
     # Center indices: [0, stride, 2*stride, ..., (npoint-1)*stride]
     # Shape: (npoint,)
     center = torch.arange(npoint, device=query_xyz.device) * stride
-    # Window: [center-half, ..., center+half]
-    # Shape: (npoint, nsample)
-    offsets = torch.arange(-half, half + 1, device=query_xyz.device)
+    # Window: [center-half, ..., center+half-1] for even nsample
+    # For nsample=32: offsets = [-16, -15, ..., 0, ..., 15] (32 values)
+    offsets = torch.arange(-half, half, device=query_xyz.device)
     idx = (center.unsqueeze(-1) + offsets.unsqueeze(0)).clamp(0, N - 1)
     # Expand to batch: (B, npoint, nsample)
     idx = idx.unsqueeze(0).expand(B, -1, -1)
@@ -131,10 +132,10 @@ def spatial_self_group(p, f, nsample):
     B, N, _ = p.shape
     half = nsample // 2
 
-    # Window indices: [i-half, ..., i+half] for each point i
-    # Shape: (N, nsample)
+    # Window indices: [i-half, ..., i+half-1] for even nsample
+    # For nsample=32: offsets = [-16, -15, ..., 0, ..., 15] (32 values)
     idx = (torch.arange(N, device=p.device).unsqueeze(-1) +
-           torch.arange(-half, half + 1, device=p.device).unsqueeze(0)).clamp(0, N - 1)
+           torch.arange(-half, half, device=p.device).unsqueeze(0)).clamp(0, N - 1)
     # Expand to batch: (B, N, nsample)
     idx = idx.unsqueeze(0).expand(B, -1, -1)
 
