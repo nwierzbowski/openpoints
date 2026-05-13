@@ -307,7 +307,7 @@ class PointNextEncoder(nn.Module):
         norm_args (_type_, optional): the args for normalization layer. Defaults to {'norm': 'bn'}.
         act_args (_type_, optional): the args for activation layer. Defaults to {'act': 'relu'}.
         expansion (int, optional): the expansion ratio of the InvResMLP block. Defaults to 4.
-        sa_layers (int, optional): the number of MLP layers to use in the SA block. Defaults to 1.
+        sa_layers (int or List[int], optional): the number of MLP layers to use in the SA block(s). Defaults to 1.
         sa_use_res (bool, optional): wheter to use residual connection in SA block. Set to True only for PointNeXt-S. 
     """
 
@@ -319,7 +319,7 @@ class PointNextEncoder(nn.Module):
                  block: str or Type[InvResMLP] = 'InvResMLP',
                  nsample: int or List[int] = 32,
                  aggr_args: dict = {'feature_type': 'dp_fj', "reduction": 'max'},
-                 sa_layers: int = 1,
+                 sa_layers: int | List[int] = 1,
                  sa_use_res: bool = False,
                  **kwargs
                  ):
@@ -335,12 +335,13 @@ class PointNextEncoder(nn.Module):
         self.conv_args = kwargs.get('conv_args', None)
         self.sampler = kwargs.get('sampler', 'fps')
         self.expansion = kwargs.get('expansion', 4)
-        self.sa_layers = sa_layers
         self.sa_use_res = sa_use_res
         self.use_res = kwargs.get('use_res', True)
 
         self.nsample = self._to_full_list(nsample)
+        self.sa_layers = self._expand_sa_layers(sa_layers)
         logging.info(f'nsample: {self.nsample}')
+        logging.info(f'sa_layers: {self.sa_layers}')
 
         # double width after downsampling.
         channels = []
@@ -351,7 +352,7 @@ class PointNextEncoder(nn.Module):
         encoder = []
         for i in range(len(blocks)):
             encoder.append(self._make_enc(
-                block, channels[i], blocks[i], stride=strides[i],
+                block, channels[i], self.sa_layers[i], blocks[i], stride=strides[i],
                 nsample=self.nsample[i],
                 is_head=i == 0 and strides[i] == 1
             ))
@@ -372,10 +373,18 @@ class PointNextEncoder(nn.Module):
                 param_list.append([param] * self.blocks[i])
         return param_list
 
-    def _make_enc(self, block, channels, blocks, stride, nsample, is_head=False):
+    def _expand_sa_layers(self, sa_layers):
+        if isinstance(sa_layers, List):
+            expanded = list(sa_layers)
+            while len(expanded) < len(self.strides):
+                expanded.append(expanded[-1] if expanded else 1)
+            return expanded[:len(self.strides)]
+        return [sa_layers] * len(self.strides)
+
+    def _make_enc(self, block, channels, sas, blocks, stride, nsample, is_head=False):
         layers = []
         layers.append(SetAbstraction(self.in_channels, channels,
-                                      self.sa_layers if not is_head else 1, stride,
+                                      sas if not is_head else 1, stride,
                                       nsample=nsample[0],
                                       sampler=self.sampler,
                                       norm_args=self.norm_args, act_args=self.act_args, conv_args=self.conv_args,

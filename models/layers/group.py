@@ -8,13 +8,36 @@ from typing import Tuple
 import copy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+def unfold_group(features: torch.Tensor, stride: int, nsample: int) -> torch.Tensor:
+    """
+    Group features using Tensor.unfold (TRUE zero-copy contiguous windows).
+    """
+    B, C, N = features.shape
+    npoint = N // stride
+    
+    pad_left = nsample // 2
+    total_padded = (npoint - 1) * stride + nsample
+    pad_right = total_padded - N - pad_left
+
+    # F.pad does a very fast 1D allocation (unavoidable for boundaries)
+    padded = F.pad(features, (pad_left, pad_right), mode='replicate')
+
+    # The Magic Zero-Copy Sliding Window.
+    # We unfold along dimension 2 (the 'N' points dimension).
+    # This returns exactly: (B, C, npoint, nsample)
+    windows = padded.unfold(dimension=2, size=nsample, step=stride)
+    
+    return windows
 
 
 def grouping_operation(features: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    """Pure PyTorch gather (no custom backward).
+    """Group features by index using torch.gather.
 
-    Used as ONNX export fallback — ONNX may fail to trace through
-    the autograd Function wrapper in GroupingOp.
+    Used by graph convolutions (DGCNN) for KNN-based edge grouping.
+    Not used by spatial grouping (spatial_group, spatial_self_group) — those use unfold_group.
 
     Args:
         features: (B, C, N) tensor of features
@@ -23,26 +46,26 @@ def grouping_operation(features: torch.Tensor, idx: torch.Tensor) -> torch.Tenso
     Returns:
         output: (B, C, npoint, nsample) tensor
     """
-    all_idx = idx.reshape(idx.shape[0], -1).unsqueeze(1)  # (B, 1, npoint*nsample)
-    all_idx = all_idx.expand(-1, features.shape[1], -1)   # (B, C, npoint*nsample) — zero-copy view
+    all_idx = idx.reshape(idx.shape[0], -1).unsqueeze(1).to(torch.int64)
+    all_idx = all_idx.expand(-1, features.shape[1], -1)
     grouped_features = features.gather(2, all_idx)
     return grouped_features.reshape(idx.shape[0], features.shape[1], idx.shape[1], idx.shape[2])
 
 
-def torch_grouping_operation(features, idx):
+def torch_grouping_operation(features: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
     """Alias for grouping_operation (from torch points kernels)."""
     return grouping_operation(features, idx)
 
 
 def gather_operation(features: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
     """Gather features by index using torch.gather.
-    
+
     Pure PyTorch implementation (replaces CUDA pointnet2_cuda.gather_points_wrapper).
-    
+
     Args:
         features: (B, C, N) tensor of features
         idx: (B, npoint) index tensor
-    
+
     Returns:
         output: (B, C, npoint) gathered features
     """
@@ -71,84 +94,56 @@ class GroupAll(nn.Module):
 
 def spatial_group(query_xyz, support_xyz, features, stride, nsample):
     """Group features using spatial ordering (Morton-coded points).
-    
+
     For stride-based subsampling, neighbors of query point i in the
     downsampled set correspond to a window around index (i * stride)
-    in the support set. No distance computation needed.
-    
+    in the support set. Uses F.unfold for contiguous window extraction.
+
     Args:
         query_xyz: (B, npoint, 3) — downsampled points
         support_xyz: (B, N, 3) — full set (Morton-ordered)
         features: (B, C, N) — feature tensor
         stride: N // npoint — downsampling ratio
         nsample: number of neighbors to gather
-    
+
     Returns:
         dp: (B, 3, npoint, nsample) — relative positions
         fj: (B, C, npoint, nsample) — grouped features
     """
     B, npoint, _ = query_xyz.shape
-    N = support_xyz.shape[1]
-    half = nsample // 2
 
-    # Center indices: [0, stride, 2*stride, ..., (npoint-1)*stride]
-    # Shape: (npoint,)
-    center = torch.arange(npoint, device=query_xyz.device) * stride
-    # Window: [center-half, ..., center+half-1] for even nsample
-    # For nsample=32: offsets = [-16, -15, ..., 0, ..., 15] (32 values)
-    offsets = torch.arange(-half, half, device=query_xyz.device)
-    idx = (center.unsqueeze(-1) + offsets.unsqueeze(0)).clamp(0, N - 1)
-    # Expand to batch: (B, npoint, nsample)
-    idx = idx.unsqueeze(0).expand(B, -1, -1)
-
-    # Group positions using grouping_operation (supports (B, 3, N) -> (B, 3, npoint, nsample))
     xyz_trans = support_xyz.transpose(1, 2)  # (B, 3, N)
-    grouped_xyz = grouping_operation(xyz_trans, idx)  # (B, 3, npoint, nsample)
-    # Relative positions
+    grouped_xyz = unfold_group(xyz_trans, stride, nsample)  # (B, 3, npoint, nsample)
     query_xyz_t = query_xyz.transpose(1, 2).unsqueeze(-1)  # (B, 3, npoint, 1)
     dp = grouped_xyz - query_xyz_t
 
-    # Group features using grouping_operation
-    fj = grouping_operation(features, idx)
-
+    fj = unfold_group(features, stride, nsample)  # (B, C, npoint, nsample)
     return dp, fj
 
 
 def spatial_self_group(p, f, nsample):
     """Self-grouping: neighbors of each point in the same set.
-    
+
     For Morton-ordered points, spatial neighbors are just the window
-    around each index. Used by LocalAggregation (InvResMLP blocks).
-    
+    around each index. Uses F.unfold for contiguous window extraction.
+
     Args:
         p: (B, N, 3) positions
         f: (B, C, N) features
         nsample: number of neighbors
-    
+
     Returns:
         dp: (B, 3, N, nsample) — relative positions
         fj: (B, C, N, nsample) — grouped features
     """
     B, N, _ = p.shape
-    half = nsample // 2
 
-    # Window indices: [i-half, ..., i+half-1] for even nsample
-    # For nsample=32: offsets = [-16, -15, ..., 0, ..., 15] (32 values)
-    idx = (torch.arange(N, device=p.device).unsqueeze(-1) +
-           torch.arange(-half, half, device=p.device).unsqueeze(0)).clamp(0, N - 1)
-    # Expand to batch: (B, N, nsample)
-    idx = idx.unsqueeze(0).expand(B, -1, -1)
-
-    # Group positions using grouping_operation
     p_trans = p.transpose(1, 2)  # (B, 3, N)
-    grouped_p = grouping_operation(p_trans, idx)  # (B, 3, N, nsample)
-    # Relative positions
-    p_t = p.transpose(1, 2).unsqueeze(-1)  # (B, 3, N, 1)
+    grouped_p = unfold_group(p_trans, stride=1, nsample=nsample)  # (B, 3, N, nsample)
+    p_t = p_trans.unsqueeze(-1)  # (B, 3, N, 1)
     dp = grouped_p - p_t
 
-    # Group features using grouping_operation
-    fj = grouping_operation(f, idx)
-
+    fj = unfold_group(f, stride=1, nsample=nsample)  # (B, C, N, nsample)
     return dp, fj
 
 

@@ -10,6 +10,16 @@ import torch.nn.functional as F
 from ..build import build_model_from_cfg, MODELS
 from ...loss import build_criterion_from_cfg
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        # This math is blistering fast in BF16
+        norm_x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return norm_x * self.weight
 
 @MODELS.register_module()
 class PointNextMAE(nn.Module):
@@ -60,33 +70,36 @@ class PointNextMAE(nn.Module):
 
         # Learnable random initialization
         self.learnable_points = nn.Parameter(
-            torch.randn(1, decoder_points, self.decoder_out_channels) * 0.1
+            torch.randn(1, decoder_points, self.decoder_out_channels) * 0.3
         )
 
         # Decoder MLP: [learnable_points (decoder_out_channels) + latent (latent_dim)] -> (decoder_out_channels)
         decoder_head_dim = self.decoder_out_channels + latent_dim
         self.decoder_mlp = nn.Sequential(
             # Stage 1: Massive Unfolding
-            nn.Linear(decoder_head_dim, decoder_hidden_dim),
+            nn.utils.weight_norm(nn.Linear(decoder_head_dim, decoder_hidden_dim )),
             # nn.LayerNorm(decoder_hidden_dim),
             nn.ReLU(),
 
             # Stage 2: Structural Logic
-            nn.Linear(decoder_hidden_dim, decoder_hidden_dim),
+            nn.utils.weight_norm(nn.Linear(decoder_hidden_dim , decoder_hidden_dim)),
             nn.ReLU(),
 
             # Stage 3: Feature Refinement
-            nn.Linear(decoder_hidden_dim, decoder_hidden_dim // 2),
+            nn.utils.weight_norm(nn.Linear(decoder_hidden_dim, decoder_hidden_dim // 2)),
             nn.ReLU(),
 
             # Stage 4: High-Frequency Detail
-            nn.Linear(decoder_hidden_dim // 2, decoder_hidden_dim // 4),
+            nn.utils.weight_norm(nn.Linear(decoder_hidden_dim // 2, decoder_hidden_dim // 4)),
             nn.ReLU(),
 
             # Stage 5: Multi-Channel Head
-            nn.Linear(decoder_hidden_dim // 4, self.decoder_out_channels),
-            nn.Tanh(),
+            nn.utils.weight_norm(nn.Linear(decoder_hidden_dim // 4, self.decoder_out_channels)),
         )
+
+        # Zero so we start at the random initializations and learn residuals slowly
+        nn.init.constant_(self.decoder_mlp[-1].weight, 0)
+        nn.init.constant_(self.decoder_mlp[-1].bias, 0)
 
         # Jitter augmentation
         self.jitter_sigma = jitter_sigma
@@ -153,18 +166,29 @@ class PointNextMAE(nn.Module):
         else:
             loss_feature = torch.ones(B, N, device=device)
 
-        # Gaussian jitter (Gaussian noise is better for Denoising Autoencoder!)
-        if self.training and torch.rand(1).item() < self.jitter_prob:
-            jitter = torch.randn_like(p) * self.jitter_sigma  # (B, N, 3)
+        B, N, _ = p.shape
+        device = p.device
+        
+        p_jittered = p
+        f_jittered = f
+
+        if self.training:
+            # 1. Create a mask for each batch element (B, 1, 1)
+            # This determines which samples in the batch get jittered
+            mask = (torch.rand(B, 1, 1, device=device) < self.jitter_prob).to(p.dtype)
+            
+            # 2. Generate jitter for the whole batch
+            # Multiplying by mask zeros out jitter for samples that didn't "pass" the prob check
+            jitter = torch.randn_like(p) * self.jitter_sigma * mask  # (B, N, 3)
+            
+            # 3. Apply jitter to p
             p_jittered = p + jitter
+            
+            # 4. Apply jitter to f (if applicable)
             if f is not None and f.shape[1] >= 3:
                 f_jittered = f.clone()
-                f_jittered[:, :3, :] = f_jittered[:, :3, :] + jitter.transpose(1, 2)  # (B, 3, N)
-            else:
-                f_jittered = f
-        else:
-            p_jittered = p
-            f_jittered = f
+                # f is usually (B, 3, N), so we transpose jitter from (B, N, 3) to (B, 3, N)
+                f_jittered[:, :3, :] += jitter.transpose(1, 2)
 
         # Encode full point cloud -> latent
         latent_global = self.encoder.forward_cls_feat(p_jittered, f_jittered)  # (B, C_out)
@@ -205,7 +229,9 @@ class PointNextMAE(nn.Module):
         # MLP outputs coordinates + features
         pred = self.decoder_mlp(inp)  # (B, P, decoder_out_channels)
 
-        return pred
+        reconstructed_points = torch.tanh(points + pred)
+
+        return reconstructed_points
 
     @torch.no_grad()
     def get_latent(self, data):
