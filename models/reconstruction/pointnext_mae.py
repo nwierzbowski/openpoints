@@ -21,6 +21,55 @@ class RMSNorm(nn.Module):
         norm_x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return norm_x * self.weight
 
+class ConditionalDecoder(nn.Module):
+    def __init__(self, latent_dim=256, query_dim=5, hidden_dim=1024):
+        super().__init__()
+        self.latent_dim = latent_dim
+        
+        # Stage 1: [Queries + Latent] -> Hidden (e.g. 261 -> 1024)
+        self.layer1 = nn.Linear(query_dim + latent_dim, hidden_dim)
+        
+        # Stage 2: [Stage1_Out + Latent] -> Hidden (e.g. 1280 -> 1024)
+        self.layer2 = nn.Linear(hidden_dim + latent_dim, hidden_dim)
+        
+        # Stage 3: [Stage2_Out + Latent] -> Hidden/2 (e.g. 1280 -> 512)
+        self.layer3 = nn.Linear(hidden_dim + latent_dim, hidden_dim // 2)
+        
+        # Stage 4: [Stage3_Out + Latent] -> Hidden/4 (e.g. 768 -> 256)
+        self.layer4 = nn.Linear(hidden_dim // 2 + latent_dim, hidden_dim // 4)
+        
+        # Stage 5: [Stage4_Out + Latent] -> Output (e.g. 512 -> decoder_out_channels)
+        self.layer5 = nn.Linear(hidden_dim // 4 + latent_dim, query_dim)  # query_dim == decoder_out_channels
+        
+        self.relu = nn.ReLU()
+
+    def forward(self, queries, latent):
+        # latent is already (B, P, latent_dim) from the decoder
+        z = latent  # (B, P, latent_dim)
+        
+        # Stage 1
+        x = torch.cat([queries, z], dim=-1)
+        x = self.relu(self.layer1(x))
+        
+        # Stage 2: inject latent again
+        x = torch.cat([x, z], dim=-1)
+        x = self.relu(self.layer2(x))
+        
+        # Stage 3: inject latent again
+        x = torch.cat([x, z], dim=-1)
+        x = self.relu(self.layer3(x))
+        
+        # Stage 4: inject latent again
+        x = torch.cat([x, z], dim=-1)
+        x = self.relu(self.layer4(x))
+        
+        # Stage 5: final injection and head
+        x = torch.cat([x, z], dim=-1)
+        out = self.layer5(x)
+        
+        return out
+
+
 @MODELS.register_module()
 class PointNextMAE(nn.Module):
     """Encoder-decoder with PointNext backbone.
@@ -70,36 +119,18 @@ class PointNextMAE(nn.Module):
 
         # Learnable random initialization
         self.learnable_points = nn.Parameter(
-            torch.randn(1, decoder_points, self.decoder_out_channels) * 0.3
+            torch.randn(1, decoder_points, self.decoder_out_channels) * 0.4
         )
 
-        # Decoder MLP: [learnable_points (decoder_out_channels) + latent (latent_dim)] -> (decoder_out_channels)
-        decoder_head_dim = self.decoder_out_channels + latent_dim
-        self.decoder_mlp = nn.Sequential(
-            # Stage 1: Massive Unfolding
-            nn.utils.weight_norm(nn.Linear(decoder_head_dim, decoder_hidden_dim )),
-            # nn.LayerNorm(decoder_hidden_dim),
-            nn.ReLU(),
-
-            # Stage 2: Structural Logic
-            nn.utils.weight_norm(nn.Linear(decoder_hidden_dim , decoder_hidden_dim)),
-            nn.ReLU(),
-
-            # Stage 3: Feature Refinement
-            nn.utils.weight_norm(nn.Linear(decoder_hidden_dim, decoder_hidden_dim // 2)),
-            nn.ReLU(),
-
-            # Stage 4: High-Frequency Detail
-            nn.utils.weight_norm(nn.Linear(decoder_hidden_dim // 2, decoder_hidden_dim // 4)),
-            nn.ReLU(),
-
-            # Stage 5: Multi-Channel Head
-            nn.utils.weight_norm(nn.Linear(decoder_hidden_dim // 4, self.decoder_out_channels)),
+        # Decoder: ConditionalDecoder with latent injected at every layer
+        self.decoder = ConditionalDecoder(
+            latent_dim=latent_dim,
+            query_dim=self.decoder_out_channels,
+            hidden_dim=decoder_hidden_dim,
         )
-
-        # Zero so we start at the random initializations and learn residuals slowly
-        nn.init.constant_(self.decoder_mlp[-1].weight, 0)
-        nn.init.constant_(self.decoder_mlp[-1].bias, 0)
+        # Zero-init final layer so we start at the random initialization
+        nn.init.constant_(self.decoder.layer5.weight, 0)
+        nn.init.constant_(self.decoder.layer5.bias, 0)
 
         # Jitter augmentation
         self.jitter_sigma = jitter_sigma
@@ -218,18 +249,15 @@ class PointNextMAE(nn.Module):
         B = latent.shape[0]
 
         # Broadcast learnable points to batch
-        points = self.learnable_points.expand(B, -1, -1)  # (B, P, 3)
+        points = self.learnable_points.expand(B, -1, -1)  # (B, P, decoder_out_channels)
 
         # Broadcast latent to each point
         latent_expanded = latent.unsqueeze(1).expand(-1, self.decoder_points, -1)  # (B, P, latent_dim)
 
-        # Concat [point_xyz, latent] per point
-        inp = torch.cat([points, latent_expanded], dim=2)  # (B, P, 3 + latent_dim)
+        # Decoder with latent injected at every layer
+        pred = self.decoder(points, latent_expanded)  # (B, P, decoder_out_channels)
 
-        # MLP outputs coordinates + features
-        pred = self.decoder_mlp(inp)  # (B, P, decoder_out_channels)
-
-        reconstructed_points = torch.tanh(points + pred)
+        reconstructed_points = points + pred
 
         return reconstructed_points
 

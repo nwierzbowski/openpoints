@@ -102,4 +102,4 @@ class FeatureWeightedChamfer(nn.Module):
         else:
             feature_mse = torch.tensor(0.0, device=pred_xyz.device)
 
-        return (forward_chamfer * 0.9 + backward_chamfer * 1.1) / 2 + self.feature_weight * feature_mse
+        return (forward_chamfer * 1.0 + backward_chamfer * 1.0) / 2 + self.feature_weight * feature_mse
