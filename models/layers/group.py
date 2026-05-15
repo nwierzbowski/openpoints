@@ -13,24 +13,26 @@ import torch.nn.functional as F
 
 def unfold_group(features: torch.Tensor, stride: int, nsample: int) -> torch.Tensor:
     """
-    Group features using Tensor.unfold (TRUE zero-copy contiguous windows).
+    Group features using gather with centered windows (ONNX-compatible).
+
+    Replaces Tensor.unfold() with torch.gather — produces identical
+    (B, C, npoint, nsample) output. Centered windows match the original
+    F.pad + unfold behavior via replicate-padding clamping.
     """
+    stride = int(stride)
+    nsample = int(nsample)
     B, C, N = features.shape
     npoint = N // stride
-    
-    pad_left = nsample // 2
-    total_padded = (npoint - 1) * stride + nsample
-    pad_right = total_padded - N - pad_left
+    half = nsample // 2
 
-    # F.pad does a very fast 1D allocation (unavoidable for boundaries)
-    padded = F.pad(features, (pad_left, pad_right), mode='replicate')
+    centers = torch.arange(npoint, device=features.device) * stride
+    offsets = torch.arange(nsample, device=features.device) - half
 
-    # The Magic Zero-Copy Sliding Window.
-    # We unfold along dimension 2 (the 'N' points dimension).
-    # This returns exactly: (B, C, npoint, nsample)
-    windows = padded.unfold(dimension=2, size=nsample, step=stride)
-    
-    return windows
+    indices = centers.unsqueeze(1) + offsets.unsqueeze(0)
+    indices = indices.clamp(0, N - 1)
+
+    idx = indices.unsqueeze(0).unsqueeze(0).expand(B, C, -1, -1)
+    return features.gather(2, idx.reshape(B, C, -1)).view(B, C, npoint, nsample)
 
 
 def grouping_operation(features: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
