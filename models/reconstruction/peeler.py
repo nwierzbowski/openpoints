@@ -186,11 +186,8 @@ class Peeler(nn.Module):
         cand_S = cand_pose[:, :, 3:6]
         cand_R = cand_pose[:, :, 6:].reshape(B, -1, 3, 3)
 
-        # Relative position in seed's local space: R_s^T * (T_c - T_s)
-        rel_pos = torch.bmm(
-            seed_R.transpose(1, 2),
-            (cand_T - seed_T.unsqueeze(1)).transpose(1, 2),
-        ).transpose(1, 2)
+        # Relative position in world space: T_c - T_s
+        rel_pos = cand_T - seed_T.unsqueeze(1)
 
         # Relative scale (log): log10(S_c / S_s)
         rel_scale = torch.log10(cand_S / (seed_S.unsqueeze(1) + 1e-8))

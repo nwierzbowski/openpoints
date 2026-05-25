@@ -25,7 +25,8 @@ class PeelerDataset(Dataset):
     Args:
         all_embeddings: list of numpy arrays, one per asset, shape (N_i, 256)
         all_transforms: list of numpy arrays, one per asset, shape (N_i, 16)
-        num_assets_per_soup: int, number of assets to mix per soup (default 3)
+        max_assets_per_soup: int, maximum number of assets to mix per soup (default 10)
+        min_assets_per_soup: int, minimum number of assets per soup (default 2)
         seed: int, random seed for reproducibility
     """
 
@@ -33,13 +34,15 @@ class PeelerDataset(Dataset):
         self,
         all_embeddings,
         all_transforms,
-        num_assets_per_soup=3,
+        max_assets_per_soup=10,
+        min_assets_per_soup=2,
         max_asset_fragments=None,
         seed=42,
     ):
         self.all_embeddings = all_embeddings  # list of (N_i, 256)
         self.all_transforms = all_transforms  # list of (N_i, 16)
-        self.num_assets_per_soup = num_assets_per_soup
+        self.max_assets_per_soup = max_assets_per_soup
+        self.min_assets_per_soup = min_assets_per_soup
         self.max_asset_fragments = max_asset_fragments
         self.rng = np.random.RandomState(seed)
 
@@ -66,9 +69,10 @@ class PeelerDataset(Dataset):
         return self.n_assets
 
     def __getitem__(self, idx):
-        # Sample K assets (include idx as one of them)
-        k = self.num_assets_per_soup
-        k = min(k, self.n_assets)
+        # Sample K assets with random size in [min, max]
+        upper = min(self.max_assets_per_soup, self.n_assets)
+        lower = min(self.min_assets_per_soup, upper)
+        k = self.rng.randint(lower, upper + 1)  # uniform [lower, upper]
         asset_indices = list(self.rng.choice(self.n_assets, size=k, replace=False))
 
         # Combine all fragments from selected assets

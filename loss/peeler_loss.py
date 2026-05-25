@@ -55,15 +55,33 @@ class PeelerLoss(nn.Module):
         # Mask: real fragments have Y[i,i]=1 (self-membership), padding is all zeros
         mask = torch.diagonal(Y, dim1=1, dim2=2)  # (B, N) - 1 for real, 0 for padding
 
-        # BCE between logits and ground truth: (B, N)
-        bce_per_frag = self.bce(membership_logits, Y_selected)
+        # Separate positives (same-asset) and negatives (different-asset)
+        pos_mask = Y_selected > 0.5  # (B, N) — True for same-asset pairs
+        neg_mask = (Y_selected < 0.5) & (mask > 0.5)  # (B, N) — True for different-asset pairs
 
-        # Masked mean: only count non-padded fragments
-        bce_loss = self.membership_weight * (bce_per_frag * mask).sum() / mask.sum().clamp(min=1.0)
+        # BCE between logits and ground truth: (B, N)
+        bce_all = self.bce(membership_logits, Y_selected)
+
+        # Mean BCE for positives and negatives separately
+        pos_loss = (bce_all * pos_mask).sum() / pos_mask.sum().clamp(min=1.0)
+        neg_loss = (bce_all * neg_mask).sum() / neg_mask.sum().clamp(min=1.0)
+
+        # Balanced loss: equal weight to pos and neg
+        bce_loss = (0.5 * pos_loss + 0.5 * neg_loss)
 
         # Weight by 1/P_anchor for gradient flow to anchor head
-        p_anchor = anchor_probs[rows, seed_idx].clamp(min=0.01)
-        loss = bce_loss / p_anchor.mean()
+        p_anchor = anchor_probs[rows, seed_idx]
+
+        baseline = bce_loss.detach().mean()
+        advantage = bce_loss.detach() - baseline
+
+        anchor_loss = (torch.log(p_anchor + 1e-8) * advantage).mean()
+
+        # Force the model to stay slightly 'curious'
+        # entropy_loss is low when one p is 1.0 and others are 0.0
+        entropy_loss = -(anchor_probs * torch.log(anchor_probs + 1e-8)).sum(dim=1).mean()
+
+        loss = bce_loss + anchor_loss - (0.01 * entropy_loss)
 
         return loss, {
             'loss_total': loss.item(),
