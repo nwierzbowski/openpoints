@@ -163,6 +163,8 @@ class Peeler(nn.Module):
         translation = mat[:, :, :3, 3]
         scale = torch.norm(mat[:, :, :3, :3], dim=-1)
         rot = mat[:, :, :3, :3] / scale[:, :, None, :]
+
+        translation = (rot.transpose(-2, -1) @ translation.unsqueeze(-1)).squeeze(-1) / scale
         rot_flat = rot.reshape(B, N, -1)
 
         return torch.cat([translation, scale, rot_flat], dim=-1)

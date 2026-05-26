@@ -63,8 +63,8 @@ class PeelerLoss(nn.Module):
         bce_all = self.bce(membership_logits, Y_selected)
 
         # Mean BCE for positives and negatives separately
-        pos_loss = (bce_all * pos_mask).sum() / pos_mask.sum().clamp(min=1.0)
-        neg_loss = (bce_all * neg_mask).sum() / neg_mask.sum().clamp(min=1.0)
+        pos_loss = (bce_all * pos_mask).sum(dim=1) / pos_mask.sum(dim=1).clamp(min=1.0)
+        neg_loss = (bce_all * neg_mask).sum(dim=1) / neg_mask.sum(dim=1).clamp(min=1.0)
 
         # Balanced loss: equal weight to pos and neg
         bce_loss = (0.5 * pos_loss + 0.5 * neg_loss)
@@ -81,9 +81,13 @@ class PeelerLoss(nn.Module):
         # entropy_loss is low when one p is 1.0 and others are 0.0
         entropy_loss = -(anchor_probs * torch.log(anchor_probs + 1e-8)).sum(dim=1).mean()
 
-        loss = bce_loss + anchor_loss - (0.01 * entropy_loss)
+        bce_loss_mean = bce_loss.mean()
+
+        loss = bce_loss_mean + anchor_loss - (0.05 * entropy_loss)
 
         return loss, {
             'loss_total': loss.item(),
-            'loss_membership': bce_loss.item(),
+            'loss_membership': bce_loss_mean.item(),
+            'loss_anchor': anchor_loss.item(),
+            'loss_entropy': entropy_loss.item(),
         }

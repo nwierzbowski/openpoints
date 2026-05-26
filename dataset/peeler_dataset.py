@@ -38,12 +38,14 @@ class PeelerDataset(Dataset):
         min_assets_per_soup=2,
         max_asset_fragments=None,
         seed=42,
+        translation_scale=0.0,
     ):
         self.all_embeddings = all_embeddings  # list of (N_i, 256)
         self.all_transforms = all_transforms  # list of (N_i, 16)
         self.max_assets_per_soup = max_assets_per_soup
         self.min_assets_per_soup = min_assets_per_soup
         self.max_asset_fragments = max_asset_fragments
+        self.translation_scale = translation_scale
         self.rng = np.random.RandomState(seed)
 
         # Subsample oversized assets to cap per-asset fragment count
@@ -95,6 +97,19 @@ class PeelerDataset(Dataset):
         soup_trans = np.concatenate(soup_trans_list, axis=0)
         asset_ids = np.concatenate(asset_ids_list, axis=0)
         orig_indices = np.array(orig_indices_list, dtype=np.int64)
+
+        # Random translation augmentation: per-asset translation in world space
+        translation_scale = getattr(self, 'translation_scale', 0.0)
+        if translation_scale > 0:
+            offset = 0
+            for asset_gid in asset_indices:
+                n_fragments = len(self.all_transforms[asset_gid])
+                t = self.rng.randn(3).astype(np.float32) * translation_scale
+                # Translation is at indices 3, 7, 11 of each row (4th column of row-major 4x4)
+                soup_trans[offset:offset + n_fragments, 3] += t[0]
+                soup_trans[offset:offset + n_fragments, 7] += t[1]
+                soup_trans[offset:offset + n_fragments, 11] += t[2]
+                offset += n_fragments
 
         # Shuffle soup
         shuffle_idx = self.rng.permutation(len(soup_emb))
