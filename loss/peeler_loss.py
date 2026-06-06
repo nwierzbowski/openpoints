@@ -1,11 +1,14 @@
-"""Peeler loss functions.
+"""Peeler loss - expected BCE over anchor distribution.
 
-Single-anchor BCE loss with straight-through gradient for anchor head.
+Loss = E_{i ~ P_anchor}[BCE(membership_logits_i, Y_i)]
 
-For each batch, the model selects one anchor via argmax. The BCE loss
-is weighted by 1/P_anchor so the anchor head learns to assign high
-probability to anchors that produce clean slices.
+For each anchor i, compute BCE against ground truth for all candidate pairs.
+Weight each anchor's error by its probability P_anchor[i].
+
+This replaces the old argmax-based loss with a smooth, differentiable objective
+that lets the anchor head learn from all anchors, not just the top-1.
 """
+import torch.nn.functional as F
 import torch
 import torch.nn as nn
 
@@ -14,80 +17,42 @@ from .build import LOSS
 
 @LOSS.register_module()
 class PeelerLoss(nn.Module):
-    """Single-anchor BCE loss with anchor head gradient flow.
+    """Expected BCE loss over anchor distribution.
 
-    Loss = BCE(membership_logits, Y_selected) / mean(P_anchor)
-
-    The 1/P_anchor weighting lets gradients flow back through softmax
-    to the anchor head, training it to prefer anchors that yield good slices.
-
-    Args:
-        membership_weight: float, weight for BCE loss (default 1.0)
+    Loss = mean_b( sum_i( P_anchor[i,b] * mean_j( BCE(affinity_logits[i,j], Y[i,j]) * mask[i] * mask[j] ) ) / mean(mask) )
     """
 
-    def __init__(
-        self,
-        membership_weight=1.0,
-        **kwargs,
-    ):
+    def __init__(self, **kwargs):
         super().__init__()
-        self.membership_weight = membership_weight
-        self.bce = nn.BCEWithLogitsLoss(reduction='none')
 
-    def forward(self, membership_logits, Y, anchor_probs, seed_idx):
+    def forward(self, anchor_probs, affinity_logits, Y, mask):
         """
         Args:
-            membership_logits: (B, N) - raw logits for selected anchor
-            Y: (B, N, N) - ground truth same-asset matrix
             anchor_probs: (B, N) - softmax distribution over anchors
-            seed_idx: (B,) - selected seed index per batch
+            affinity_logits: (B, N, N) - raw logits for ALL anchor-candidate pairs
+            Y: (B, N, N) - ground truth same-asset matrix
+            mask: (B, N) - 1 for real fragments, 0 for padding
 
         Returns:
-            loss: scalar total loss
-            loss_dict: dict with individual loss components
+            loss: scalar expected BCE loss
+            loss_dict: dict with loss components
         """
         B, N, _ = Y.shape
 
-        # Gather Y row for selected anchor: (B, N)
-        rows = torch.arange(B, device=Y.device)
-        Y_selected = Y[rows, seed_idx]
+        # 1. Calculate BCE for EVERY possible relationship in the soup
+        bce_matrix = F.binary_cross_entropy_with_logits(affinity_logits, Y, reduction='none')  # [B, N, N]
 
-        # Mask: real fragments have Y[i,i]=1 (self-membership), padding is all zeros
-        mask = torch.diagonal(Y, dim1=1, dim2=2)  # (B, N) - 1 for real, 0 for padding
+        # 2. Mask the padding (Both rows and columns)
+        mask_2d = mask.unsqueeze(1) * mask.unsqueeze(2)  # [B, N, N]
+        masked_bce = bce_matrix * mask_2d  # [B, N, N]
 
-        # Separate positives (same-asset) and negatives (different-asset)
-        pos_mask = Y_selected > 0.5  # (B, N) — True for same-asset pairs
-        neg_mask = (Y_selected < 0.5) & (mask > 0.5)  # (B, N) — True for different-asset pairs
+        # 3. Calculate the error per anchor (mean across candidates)
+        error_per_anchor = masked_bce.sum(dim=2) / (mask.sum(dim=1, keepdim=True) + 1e-8)  # [B, N]
 
-        # BCE between logits and ground truth: (B, N)
-        bce_all = self.bce(membership_logits, Y_selected)
+        # 4. THE EXPECTED LOSS: Weight errors by anchor probabilities
+        expected_loss = (anchor_probs * error_per_anchor).sum(dim=1).mean()  # scalar
 
-        # Mean BCE for positives and negatives separately
-        pos_loss = (bce_all * pos_mask).sum(dim=1) / pos_mask.sum(dim=1).clamp(min=1.0)
-        neg_loss = (bce_all * neg_mask).sum(dim=1) / neg_mask.sum(dim=1).clamp(min=1.0)
-
-        # Balanced loss: equal weight to pos and neg
-        bce_loss = (0.5 * pos_loss + 0.5 * neg_loss)
-
-        # Weight by 1/P_anchor for gradient flow to anchor head
-        p_anchor = anchor_probs[rows, seed_idx]
-
-        baseline = bce_loss.detach().mean()
-        advantage = bce_loss.detach() - baseline
-
-        anchor_loss = (torch.log(p_anchor + 1e-8) * advantage).mean()
-
-        # Force the model to stay slightly 'curious'
-        # entropy_loss is low when one p is 1.0 and others are 0.0
-        entropy_loss = -(anchor_probs * torch.log(anchor_probs + 1e-8)).sum(dim=1).mean()
-
-        bce_loss_mean = bce_loss.mean()
-
-        loss = bce_loss_mean + anchor_loss - (0.05 * entropy_loss)
-
-        return loss, {
-            'loss_total': loss.item(),
-            'loss_membership': bce_loss_mean.item(),
-            'loss_anchor': anchor_loss.item(),
-            'loss_entropy': entropy_loss.item(),
+        return expected_loss, {
+            'loss_total': expected_loss.item(),
+            'loss_bce': expected_loss.item(),
         }
