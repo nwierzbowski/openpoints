@@ -9,4 +9,3 @@ from .scanobjectnn import *
 from .shapenetpart import *
 from .scannetv2 import *
 from .tbo_dataset import TBODataset
-from .peeler_dataset import PeelerDataset

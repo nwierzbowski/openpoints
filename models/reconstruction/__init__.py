@@ -7,4 +7,3 @@ from .maskedpointvit import MaskedPointViT
 from .maskedpoint import MaskedPoint
 from .maskedpointgroup import MaskedPointGroup
 from .pointnext_mae import PointNextMAE
-from .peeler import Peeler
