@@ -20,54 +20,63 @@ class RMSNorm(nn.Module):
         # This math is blistering fast in BF16
         norm_x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return norm_x * self.weight
+    
+class GeGLU(nn.Module):
+    """
+    ONNX-safe Gated Linear Unit with GELU activation.
+    Splits the last dimension in half and uses one half to gate the other.
+    """
+    def forward(self, x):
+        # chunk(2, dim=-1) splits the channel dimension into two equal tensors
+        x1, x2 = x.chunk(2, dim=-1)
+        return x1 * torch.nn.functional.silu(x2)
 
 class ConditionalDecoder(nn.Module):
-    def __init__(self, latent_dim=256, query_dim=5, hidden_dim=1024):
+    def __init__(self, latent_dim, query_dim):
         super().__init__()
-        self.latent_dim = latent_dim
+
+        width = query_dim + latent_dim
         
-        # Stage 1: [Queries + Latent] -> Hidden (e.g. 261 -> 1024)
-        self.layer1 = nn.Linear(query_dim + latent_dim, hidden_dim)
+        self.layer1 = nn.Sequential(
+            nn.Linear(width, latent_dim * 2),
+            GeGLU(),
+        )
         
-        # Stage 2: [Stage1_Out + Latent] -> Hidden (e.g. 1280 -> 1024)
-        self.layer2 = nn.Linear(hidden_dim + latent_dim, hidden_dim)
+        self.layer2 = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim * 2),
+            GeGLU(),
+        )
         
         # Stage 3: [Stage2_Out + Latent] -> Hidden/2 (e.g. 1280 -> 512)
-        self.layer3 = nn.Linear(hidden_dim + latent_dim, hidden_dim // 2)
+        self.layer3 = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim * 2),
+            GeGLU(),
+        )
         
-        # Stage 4: [Stage3_Out + Latent] -> Hidden/4 (e.g. 768 -> 256)
-        self.layer4 = nn.Linear(hidden_dim // 2 + latent_dim, hidden_dim // 4)
-        
-        # Stage 5: [Stage4_Out + Latent] -> Output (e.g. 512 -> decoder_out_channels)
-        self.layer5 = nn.Linear(hidden_dim // 4 + latent_dim, query_dim)  # query_dim == decoder_out_channels
-        
-        self.relu = nn.ReLU()
+        # # Stage 4: [Stage3_Out + Latent] -> Hidden/4 (e.g. 768 -> 256)
+        self.layer4 = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim * 2),
+            GeGLU(),
+        )
+
+        self.layer5 = nn.Sequential(nn.Linear(latent_dim, query_dim * 2), GeGLU())
 
     def forward(self, queries, latent):
         # latent is already (B, P, latent_dim) from the decoder
-        z = latent  # (B, P, latent_dim)
         
-        # Stage 1
-        x = torch.cat([queries, z], dim=-1)
-        x = self.relu(self.layer1(x))
+        x = latent
+
+        x = x + self.layer1(torch.cat([queries, latent], dim=-1))
+
+        x = x + self.layer2(x)
         
-        # Stage 2: inject latent again
-        x = torch.cat([x, z], dim=-1)
-        x = self.relu(self.layer2(x))
+        x = x + self.layer3(x)
+
+        x = x + self.layer4(x)
+
+        x = self.layer5(x)
         
-        # Stage 3: inject latent again
-        x = torch.cat([x, z], dim=-1)
-        x = self.relu(self.layer3(x))
-        
-        # Stage 4: inject latent again
-        x = torch.cat([x, z], dim=-1)
-        x = self.relu(self.layer4(x))
-        
-        # Stage 5: final injection and head
-        x = torch.cat([x, z], dim=-1)
-        out = self.layer5(x)
-        
-        return out
+        return x
 
 
 @MODELS.register_module()
@@ -126,11 +135,10 @@ class PointNextMAE(nn.Module):
         self.decoder = ConditionalDecoder(
             latent_dim=latent_dim,
             query_dim=self.decoder_out_channels,
-            hidden_dim=decoder_hidden_dim,
         )
         # Zero-init final layer so we start at the random initialization
-        nn.init.constant_(self.decoder.layer5.weight, 0)
-        nn.init.constant_(self.decoder.layer5.bias, 0)
+        # nn.init.constant_(self.decoder.layer5.weight, 0)
+        # nn.init.constant_(self.decoder.layer5.bias, 0)
 
         # Jitter augmentation
         self.jitter_sigma = jitter_sigma
