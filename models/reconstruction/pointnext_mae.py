@@ -109,7 +109,7 @@ class PointNextMAE(nn.Module):
         encoder_out_dim = self.encoder.out_channels
 
         # Pre-computed integer indices for feat tensor column access
-        # Set by ApplicationService.validate_channels() — model knows zero channel names
+        # Set by channel validation — model knows zero channel names
         self.decoder_indices = channel_indices['decoder_indices']  # e.g., [0, 2] for normal+combined
         self.encoder_indices = channel_indices.get('encoder_indices', None)
         self.loss_feature_idx = channel_indices['loss_feature_idx']
